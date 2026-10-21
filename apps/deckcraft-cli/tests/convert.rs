@@ -55,3 +55,19 @@ fn run_rejects_unsupported_save_and_export_paths_before_running() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn convert_pdf_to_pptx() {
+    let dir = temp_dir("convert-pdf");
+    let pdf = dir.join("deck.pdf");
+    let out = Command::new(env!("CARGO_BIN_EXE_deckcraft-cli")).args(["run", "--sample", "--export"]).arg(&pdf).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let pptx = dir.join("deck.pptx");
+    let out = cli(&[Path::new("convert"), &pdf, &pptx]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let info = cli(&[Path::new("info"), &pptx]);
+    assert!(info.status.success(), "{}", String::from_utf8_lossy(&info.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert!(json["slides"].as_array().is_some_and(|s| s.len() > 1), "{json}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

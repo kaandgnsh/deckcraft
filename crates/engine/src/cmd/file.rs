@@ -153,6 +153,11 @@ pub fn open_checked(name: &str, bytes: &[u8]) -> Result<(Presentation, Damage)> 
 }
 
 fn open_other(name: &str, bytes: &[u8]) -> Result<(Presentation, Vec<String>)> {
+    // A PDF by its header, whatever its name: PdfCraft converts each page to a slide of editable
+    // text boxes and pictures, which the PowerPoint reader opens.
+    if pdfcraft_office::is_pdf(bytes) {
+        return open_pdf(name, bytes, &pdfcraft_office::Options::default());
+    }
     if deckcraft_pptx::sniff(bytes) {
         let (mut p, lost_slides) = deckcraft_pptx::import_checked(bytes).map_err(|e| EngineError::Other(e.to_string()))?;
         deckcraft_format::repair(&mut p);
@@ -208,6 +213,24 @@ pub fn read_presentation_file(path: &str) -> Result<LoadedFile> {
     let native = deckcraft_format::sniff(&bytes) || deckcraft_pptx::sniff(&bytes);
     Ok(LoadedFile { path: path.to_string(), doc, native, damaged })
 }
+
+/// The PDF in `bytes` as a presentation, one slide per page (`opts`: password, pages).
+pub fn open_pdf(name: &str, bytes: &[u8], opts: &pdfcraft_office::Options) -> Result<(Presentation, Vec<String>)> {
+    let out = pdfcraft_office::convert(bytes, pdfcraft_office::Target::PptxPages, opts).map_err(|e| match e {
+        pdfcraft_office::Error::NeedsPassword => EngineError::Other(format!("{name}: {PASSWORD_REQUIRED}")),
+        pdfcraft_office::Error::WrongPassword => EngineError::Other(format!("{name}: {WRONG_PASSWORD}")),
+        other => EngineError::Other(format!("{name}: {other}")),
+    })?;
+    let (mut p, lost) =
+        deckcraft_pptx::import_checked(&out.bytes).map_err(|e| EngineError::Other(format!("{name}: the converted PDF could not be read ({e})")))?;
+    deckcraft_format::repair(&mut p);
+    Ok((p, lost))
+}
+
+/// What opening a password-protected file without its password says.
+pub const PASSWORD_REQUIRED: &str = "this file is protected with a password";
+/// What opening a password-protected file with the wrong password says.
+pub const WRONG_PASSWORD: &str = "the password is incorrect";
 
 /// Add a loaded presentation as the active document: the shared end of `file.open` and
 /// `file.adopt`. A damaged file opens as an untitled repaired copy, so Save can't overwrite the

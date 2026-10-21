@@ -16,6 +16,7 @@ deckcraft-fonts = { workspace = true }
 deckcraft-text = { workspace = true }
 deckcraft-render = { workspace = true }
 deckcraft-pdf = { workspace = true }
+pdfcraft-office = { workspace = true }
 deckcraft-format = { workspace = true }
 deckcraft-pptx = { workspace = true }
 deckcraft-media = { workspace = true }

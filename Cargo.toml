@@ -20,6 +20,8 @@ deckcraft-fonts = { path = "crates/fonts" }
 deckcraft-text = { path = "crates/text" }
 deckcraft-render = { path = "crates/render" }
 deckcraft-pdf = { path = "crates/pdf" }
+# Open PDF: PdfCraft's PDF → PowerPoint conversion.
+pdfcraft-office = { path = "../pdfcraft/crates/office" }
 deckcraft-pptx = { path = "crates/pptx" }
 deckcraft-format = { path = "crates/format" }
 deckcraft-anim = { path = "crates/anim" }
