@@ -9,6 +9,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 /// A presentation being read on a background thread.
 pub struct Opening {
     pub path: String,
+    /// The PDF pages asked for, kept for the password dialog to ask again with.
+    pub pages: Option<String>,
     pub started_ms: f64,
     rx: Receiver<Result<LoadedFile, String>>,
 }
@@ -24,6 +26,12 @@ impl SlideApp {
     /// Open `path` without blocking the UI: the file is read on a thread and the progress window
     /// shows until it arrives. Without threads (the web build) it opens at once.
     pub fn open_path_in_background(&mut self, path: &str) {
+        self.open_path_in_background_with(path, &deckcraft_engine::cmd::file::OpenParams::default());
+    }
+
+    /// [`Self::open_path_in_background`] with a PDF's password and pages. A file that needs a
+    /// password (none given, or a wrong one) asks for it.
+    pub fn open_path_in_background_with(&mut self, path: &str, opts: &deckcraft_engine::cmd::file::OpenParams) {
         if let Some(o) = &self.opening {
             let name = o.name();
             self.set_status(format!("Still opening {name}"));
@@ -31,23 +39,23 @@ impl SlideApp {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            if let Err(e) = self.open_path(path) {
-                self.notify(e);
+            if let Err(e) = self.open_path_with(path, opts) {
+                self.open_failed(path, opts, e);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (tx, rx) = std::sync::mpsc::channel();
-            let p = path.to_string();
+            let (p, o) = (path.to_string(), opts.clone());
             let spawned = std::thread::Builder::new().name("deckcraft-open".into()).spawn(move || {
-                let r = deckcraft_engine::cmd::file::read_presentation_file(&p).map_err(|e| e.to_string());
+                let r = deckcraft_engine::cmd::file::read_presentation_file_with(&p, &o).map_err(|e| e.to_string());
                 let _ = tx.send(r);
             });
             match spawned {
-                Ok(_) => self.opening = Some(Opening { path: path.to_string(), started_ms: crate::now_ms(), rx }),
+                Ok(_) => self.opening = Some(Opening { path: path.to_string(), pages: opts.pages.clone(), started_ms: crate::now_ms(), rx }),
                 Err(_) => {
-                    if let Err(e) = self.open_path(path) {
-                        self.notify(e);
+                    if let Err(e) = self.open_path_with(path, opts) {
+                        self.open_failed(path, opts, e);
                     }
                 }
             }
@@ -80,7 +88,19 @@ impl SlideApp {
                 }
             }
             // Over the start screen too, like a failed file.open (#346).
-            Err(e) => self.notify(e),
+            Err(e) => self.open_failed(&o.path, &deckcraft_engine::cmd::file::OpenParams { password: None, pages: o.pages }, e),
+        }
+    }
+
+    /// Opening `path` failed with `e`: a file that wants a password asks for it (again, after a
+    /// wrong one); anything else is shown.
+    pub(crate) fn open_failed(&mut self, path: &str, opts: &deckcraft_engine::cmd::file::OpenParams, e: String) {
+        if deckcraft_engine::cmd::file::needs_password(&e) {
+            let mut d = crate::dialogs::Dialog::new("password");
+            d.params = serde_json::json!({"path": path, "pages": opts.pages, "wrong": deckcraft_engine::cmd::file::wrong_password(&e)});
+            self.dialog = Some(d);
+        } else {
+            self.notify(e);
         }
     }
 
@@ -178,13 +198,57 @@ mod tests {
         assert!(app.toast.as_ref().is_some_and(|t| t.text.contains("missing.pptx")), "the reason is shown");
     }
 
+    /// A PDF with an open password asks for it; the right one opens it, a wrong one asks again.
+    #[test]
+    fn a_password_protected_pdf_asks_for_its_password() {
+        use egui_kittest::kittest::Queryable;
+        let path = std::env::temp_dir().join(format!("deckcraft-opening-{}-enc.pdf", std::process::id()));
+        std::fs::write(&path, include_bytes!("../../engine/tests/data/encrypted.pdf")).unwrap();
+        let path = path.to_string_lossy().to_string();
+        let mut app = SlideApp::new(Session::new(), crate::Services::default());
+        app.open_path_in_background(&path);
+        wait(&mut app);
+        assert!(app.session.documents().is_empty());
+        let d = app.dialog.as_ref().expect("the password dialog");
+        assert_eq!((d.id.as_str(), d.params["path"].as_str(), d.params["wrong"].as_bool()), ("password", Some(path.as_str()), Some(false)));
+        app.open_path_in_background_with(&path, &deckcraft_engine::cmd::file::OpenParams { password: Some("yanlis".into()), pages: None });
+        wait(&mut app);
+        assert_eq!(app.dialog.as_ref().map(|d| d.params["wrong"].as_bool()), Some(Some(true)), "a wrong password asks again");
+        // The dialog: the password typed, then OK.
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
+            |ui, app: &mut SlideApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app,
+        );
+        harness.run_steps(2);
+        harness.get_by_label_contains("The password is incorrect");
+        if let Some(d) = harness.state_mut().dialog.as_mut() {
+            d.fields.insert("password".into(), "kullanici".into());
+        }
+        harness.get_by_label("OK").click();
+        for _ in 0..500 {
+            harness.run_steps(1);
+            if harness.state().opening.is_none() && !harness.state().session.documents().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        harness.run_steps(1);
+        let app = harness.state();
+        assert_eq!(app.session.documents().len(), 1);
+        assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("Converted from PDF")), "{:?}", app.status);
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn the_progress_window_shows_and_cancel_closes_it() {
         use egui_kittest::kittest::Queryable;
         let mut app = SlideApp::new(Session::with_new(), crate::Services::default());
         // A read that never answers: the window stays until Cancel.
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.opening = Some(Opening { path: "/decks/Big deck.pptx".into(), started_ms: crate::now_ms(), rx });
+        app.opening = Some(Opening { path: "/decks/Big deck.pptx".into(), pages: None, started_ms: crate::now_ms(), rx });
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
             |ui, app: &mut SlideApp| {
                 app.logic(ui.ctx());

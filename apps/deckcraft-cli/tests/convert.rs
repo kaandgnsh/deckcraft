@@ -71,3 +71,14 @@ fn convert_pdf_to_pptx() {
     assert!(json["slides"].as_array().is_some_and(|s| s.len() > 1), "{json}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn convert_encrypted_pdf_needs_password() {
+    let dir = temp_dir("convert-enc");
+    let pdf = dir.join("enc.pdf");
+    std::fs::write(&pdf, include_bytes!("../../../crates/engine/tests/data/encrypted.pdf")).unwrap();
+    let out = cli(&[Path::new("convert"), &pdf, &dir.join("enc.pptx")]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("password"), "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}

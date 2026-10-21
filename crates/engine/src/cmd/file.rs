@@ -18,7 +18,7 @@ pub fn specs() -> Vec<CommandSpec> {
             new
         ),
         cmd!(query "file.templates", "Starter Templates", [], None, "{} → [{name, summary, theme, slides}]", always, templates),
-        cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"), "{path}", always, open),
+        cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"), "{path, password?: string (a password-protected PDF's), pages?: range (\"2-3,5\": a PDF's pages to open, 1-based; default all)} → {document, slides, …, converted?: {from: pdf, pages, imageOnlyPages, truncatedPages}}", always, open),
         cmd!(
             noundo "file.adopt",
             "Open",
@@ -28,7 +28,7 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             adopt
         ),
-        cmd!(noundo "file.openBytes", "Open Data", [], None, "{name, data: base64}", always, open_bytes),
+        cmd!(noundo "file.openBytes", "Open Data", [], None, "{name, data: base64, password?, pages? (as file.open)}", always, open_bytes),
         cmd!(noundo "file.save", "Save", ["File"], Some("Cmd+S"), "{path?, format?: deckcraft|pptx}", has_doc, save),
         cmd!(noundo "file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), "{path, format?}", has_doc, save_as),
         cmd!(noundo "file.saveTemplate", "Save as Template…", ["File"], None, "{path}", has_doc, save_as),
@@ -135,6 +135,43 @@ pub struct Damage {
     pub media: Vec<String>,
     /// Slides a `.pptx` lists but that couldn't be read, so they are not in the presentation.
     pub slides: Vec<String>,
+    /// A PDF converted to slides: what converting it found (not damage: the file opens as is).
+    pub pdf: Option<PdfReport>,
+}
+
+/// What converting a PDF found, for the message Open shows.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PdfReport {
+    /// Pages in the PDF, whether or not all were converted.
+    pub page_count: usize,
+    /// Converted pages (0-based) with pictures but no text: scans.
+    pub image_only_pages: Vec<usize>,
+    /// Pages (0-based) whose text may be missing (forms nested too deep to read).
+    pub truncated_pages: Vec<usize>,
+}
+
+/// How to open a file: a PDF's password and pages.
+#[derive(Debug, Default, Clone)]
+pub struct OpenParams {
+    pub password: Option<String>,
+    /// Pages named like `2-3, 5` (1-based); all when `None` or blank.
+    pub pages: Option<String>,
+}
+
+impl OpenParams {
+    fn from_params(p: &Value) -> Self {
+        OpenParams { password: str_param(p, "password").map(str::to_owned), pages: str_param(p, "pages").map(str::to_owned) }
+    }
+}
+
+/// Does opening fail for want of a password (none given, or a wrong one)? The UI then asks for it.
+pub fn needs_password(error: &str) -> bool {
+    error.contains(PASSWORD_REQUIRED) || error.contains(WRONG_PASSWORD)
+}
+
+/// Was the password given wrong?
+pub fn wrong_password(error: &str) -> bool {
+    error.contains(WRONG_PASSWORD)
 }
 
 impl Damage {
@@ -145,19 +182,25 @@ impl Damage {
 
 /// [`open_presentation`], plus what the file had lost or damaged.
 pub fn open_checked(name: &str, bytes: &[u8]) -> Result<(Presentation, Damage)> {
-    if deckcraft_format::sniff(bytes) {
-        let (p, media) = deckcraft_format::load_checked(bytes).map_err(|e| EngineError::Other(e.to_string()))?;
-        return Ok((p, Damage { media, slides: vec![] }));
-    }
-    open_other(name, bytes).map(|(p, slides)| (p, Damage { media: vec![], slides }))
+    open_checked_with(name, bytes, &OpenParams::default())
 }
 
-fn open_other(name: &str, bytes: &[u8]) -> Result<(Presentation, Vec<String>)> {
+/// [`open_checked`] with a PDF's password and pages.
+pub fn open_checked_with(name: &str, bytes: &[u8], opts: &OpenParams) -> Result<(Presentation, Damage)> {
+    if deckcraft_format::sniff(bytes) {
+        let (p, media) = deckcraft_format::load_checked(bytes).map_err(|e| EngineError::Other(e.to_string()))?;
+        return Ok((p, Damage { media, ..Default::default() }));
+    }
     // A PDF by its header, whatever its name: PdfCraft converts each page to a slide of editable
     // text boxes and pictures, which the PowerPoint reader opens.
     if pdfcraft_office::is_pdf(bytes) {
-        return open_pdf(name, bytes, &pdfcraft_office::Options::default());
+        let (p, slides, report) = open_pdf_pages(name, bytes, opts)?;
+        return Ok((p, Damage { slides, pdf: Some(report), ..Default::default() }));
     }
+    open_other(name, bytes).map(|(p, slides)| (p, Damage { slides, ..Default::default() }))
+}
+
+fn open_other(name: &str, bytes: &[u8]) -> Result<(Presentation, Vec<String>)> {
     if deckcraft_pptx::sniff(bytes) {
         let (mut p, lost_slides) = deckcraft_pptx::import_checked(bytes).map_err(|e| EngineError::Other(e.to_string()))?;
         deckcraft_format::repair(&mut p);
@@ -208,23 +251,74 @@ pub struct LoadedFile {
 /// Read and parse the presentation at `path`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_presentation_file(path: &str) -> Result<LoadedFile> {
+    read_presentation_file_with(path, &OpenParams::default())
+}
+
+/// [`read_presentation_file`] with a PDF's password and pages.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_presentation_file_with(path: &str, opts: &OpenParams) -> Result<LoadedFile> {
     let bytes = crate::io::read_file(path).map_err(EngineError::Other)?;
-    let (doc, damaged) = open_checked(path, &bytes)?;
+    let (doc, damaged) = open_checked_with(path, &bytes, opts)?;
     let native = deckcraft_format::sniff(&bytes) || deckcraft_pptx::sniff(&bytes);
     Ok(LoadedFile { path: path.to_string(), doc, native, damaged })
 }
 
 /// The PDF in `bytes` as a presentation, one slide per page (`opts`: password, pages).
 pub fn open_pdf(name: &str, bytes: &[u8], opts: &pdfcraft_office::Options) -> Result<(Presentation, Vec<String>)> {
-    let out = pdfcraft_office::convert(bytes, pdfcraft_office::Target::PptxPages, opts).map_err(|e| match e {
-        pdfcraft_office::Error::NeedsPassword => EngineError::Other(format!("{name}: {PASSWORD_REQUIRED}")),
-        pdfcraft_office::Error::WrongPassword => EngineError::Other(format!("{name}: {WRONG_PASSWORD}")),
-        other => EngineError::Other(format!("{name}: {other}")),
-    })?;
+    open_pdf_report(name, bytes, opts).map(|(p, lost, _)| (p, lost))
+}
+
+fn open_pdf_report(name: &str, bytes: &[u8], opts: &pdfcraft_office::Options) -> Result<(Presentation, Vec<String>, PdfReport)> {
+    let out = pdfcraft_office::convert(bytes, pdfcraft_office::Target::PptxPages, opts).map_err(|e| pdf_error(name, e))?;
     let (mut p, lost) =
         deckcraft_pptx::import_checked(&out.bytes).map_err(|e| EngineError::Other(format!("{name}: the converted PDF could not be read ({e})")))?;
     deckcraft_format::repair(&mut p);
-    Ok((p, lost))
+    let report = PdfReport { page_count: out.page_count, image_only_pages: out.image_only_pages, truncated_pages: out.truncated_pages };
+    Ok((p, lost, report))
+}
+
+/// [`open_pdf`] with [`OpenParams`]: the page range checked against the PDF's page count.
+fn open_pdf_pages(name: &str, bytes: &[u8], opts: &OpenParams) -> Result<(Presentation, Vec<String>, PdfReport)> {
+    let password = opts.password.as_deref().filter(|p| !p.is_empty());
+    let pages = match opts.pages.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        None => None,
+        Some(t) => {
+            let count = pdfcraft_office::page_count(bytes, password).map_err(|e| pdf_error(name, e))?;
+            Some(pdfcraft_office::parse_page_range(t, count).map_err(|e| pdf_error(name, e))?)
+        }
+    };
+    open_pdf_report(name, bytes, &pdfcraft_office::Options { password: password.map(str::to_owned), pages, title: None })
+}
+
+fn pdf_error(name: &str, e: pdfcraft_office::Error) -> EngineError {
+    match e {
+        pdfcraft_office::Error::NeedsPassword => EngineError::Other(format!("{name}: {PASSWORD_REQUIRED}")),
+        pdfcraft_office::Error::WrongPassword => EngineError::Other(format!("{name}: {WRONG_PASSWORD}")),
+        other => EngineError::Other(format!("{name}: {other}")),
+    }
+}
+
+/// Say that a PDF was converted, and what converting it couldn't bring over.
+fn report_pdf(s: &mut Session, report: &PdfReport) {
+    let pages = |list: &[usize]| {
+        let shown: Vec<String> = list.iter().take(6).map(|p| (p + 1).to_string()).collect();
+        if list.len() > 6 { format!("{}…", shown.join(", ")) } else { shown.join(", ") }
+    };
+    let mut text = format!("Converted from PDF ({} pages): the layout may differ from the original.", report.page_count);
+    if !report.image_only_pages.is_empty() {
+        text.push_str(&format!(" Pages {} are pictures without text (scans); OCR can recognize their words.", pages(&report.image_only_pages)));
+    }
+    if !report.truncated_pages.is_empty() {
+        text.push_str(&format!(" Some text on pages {} may be missing.", pages(&report.truncated_pages)));
+    }
+    s.ui_requests.push(crate::UiRequest::Message { text });
+}
+
+fn converted(report: Option<&PdfReport>) -> Value {
+    report.map_or(
+        Value::Null,
+        |r| json!({"from": "pdf", "pages": r.page_count, "imageOnlyPages": r.image_only_pages, "truncatedPages": r.truncated_pages}),
+    )
 }
 
 /// What opening a password-protected file without its password says.
@@ -240,17 +334,24 @@ fn adopt_loaded(s: &mut Session, f: LoadedFile) -> Result<Value> {
     let keep_path = native && damaged.is_empty();
     let i = add_opened(s, &path, keep_path.then(|| path.clone()), doc);
     report_damage(s, &damaged)?;
+    if let Some(r) = &damaged.pdf {
+        report_pdf(s, r);
+    }
     let st = s.doc()?;
-    Ok(json!({
+    let mut out = json!({
         "document": i, "slides": st.doc.slides.len(), "missingFonts": st.missing_fonts,
         "damagedMedia": damaged.media, "lostSlides": damaged.slides,
-    }))
+    });
+    if damaged.pdf.is_some() {
+        out["converted"] = converted(damaged.pdf.as_ref());
+    }
+    Ok(out)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
-    adopt_loaded(s, read_presentation_file(path)?)
+    adopt_loaded(s, read_presentation_file_with(path, &OpenParams::from_params(p))?)
 }
 
 /// `file.adopt {path, token?}`: add the presentation a host read in the background and staged
@@ -275,10 +376,17 @@ fn open(_s: &mut Session, _p: &Value) -> Result<Value> {
 fn open_bytes(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_param(p, "name").unwrap_or("Presentation");
     let data = str_param(p, "data").and_then(base64_decode).ok_or_else(|| bad("file.openBytes", "missing or invalid base64 `data`"))?;
-    let (doc, damaged) = open_checked(name, &data)?;
+    let (doc, damaged) = open_checked_with(name, &data, &OpenParams::from_params(p))?;
     let i = add_opened(s, name, None, doc);
     report_damage(s, &damaged)?;
-    Ok(json!({"document": i, "missingFonts": s.doc()?.missing_fonts, "damagedMedia": damaged.media, "lostSlides": damaged.slides}))
+    if let Some(r) = &damaged.pdf {
+        report_pdf(s, r);
+    }
+    let mut out = json!({"document": i, "missingFonts": s.doc()?.missing_fonts, "damagedMedia": damaged.media, "lostSlides": damaged.slides});
+    if damaged.pdf.is_some() {
+        out["converted"] = converted(damaged.pdf.as_ref());
+    }
+    Ok(out)
 }
 
 /// Tell the user which pictures, media and slides a damaged file lost, and mark the copy repaired.

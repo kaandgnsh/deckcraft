@@ -41,6 +41,7 @@ fn title(id: &str) -> &'static str {
         "comment" => "New Comment",
         "altText" => "Alt Text",
         "outline" => "Slides from Outline",
+        "password" => "Password",
         "renameSection" => "Rename Section",
         "renameShape" => "Rename",
         "renameLayout" => "Rename Layout",
@@ -1519,6 +1520,29 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             let (ok, cancel) = buttons(ui, "Insert");
             if ok {
                 run(app, "slide.fromOutline", json!({"text": v}));
+            }
+            ok || cancel
+        }
+        "password" => {
+            let path = d.params.get("path").and_then(Value::as_str).unwrap_or("").to_string();
+            let name = std::path::Path::new(&path).file_name().map_or(path.clone(), |n| n.to_string_lossy().into_owned());
+            if d.params.get("wrong").and_then(Value::as_bool).unwrap_or(false) {
+                ui.colored_label(ui.visuals().error_fg_color, "The password is incorrect. Try again.");
+            }
+            ui.label(format!("“{name}” is protected with a password. Enter it to open the file."));
+            ui.add_space(4.0);
+            let mut pw = d.get("password", "");
+            ui.horizontal(|ui| {
+                ui.add_sized(vec2(120.0, 20.0), egui::Label::new("Password:"));
+                ui.add(egui::TextEdit::singleline(&mut pw).password(true).desired_width(180.0)).request_focus();
+            });
+            d.fields.insert("password".into(), pw.clone());
+            let (ok, cancel) = buttons(ui, "OK");
+            if ok {
+                let pages = d.params.get("pages").and_then(Value::as_str).map(str::to_owned);
+                let opts = deckcraft_engine::cmd::file::OpenParams { password: Some(pw), pages };
+                // A wrong password opens this dialog again, as a new one.
+                app.open_path_in_background_with(&path, &opts);
             }
             ok || cancel
         }

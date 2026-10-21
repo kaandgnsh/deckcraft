@@ -1183,7 +1183,19 @@ impl SlideApp {
     }
 
     pub fn open_path(&mut self, path: &str) -> Result<(), String> {
-        self.session.execute("file.open", &json!({"path": path})).map_err(|e| e.to_string())?;
+        self.open_path_with(path, &deckcraft_engine::cmd::file::OpenParams::default())
+    }
+
+    /// [`Self::open_path`] with a PDF's password and pages.
+    pub fn open_path_with(&mut self, path: &str, opts: &deckcraft_engine::cmd::file::OpenParams) -> Result<(), String> {
+        let mut p = json!({"path": path});
+        if let Some(pw) = &opts.password {
+            p["password"] = json!(pw);
+        }
+        if let Some(pages) = &opts.pages {
+            p["pages"] = json!(pages);
+        }
+        self.session.execute("file.open", &p).map_err(|e| e.to_string())?;
         self.note_recent(path);
         Ok(())
     }

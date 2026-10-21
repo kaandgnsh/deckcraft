@@ -118,3 +118,70 @@ fn hostile_pdf_never_panics() {
         let _ = open_presentation("bad.pdf", &v);
     }
 }
+
+/// A PDF made by PdfCraft (File › Protect) with the open password `kullanici`; see
+/// ATTRIBUTION.md.
+const ENCRYPTED: &[u8] = include_bytes!("../tests/data/encrypted.pdf");
+
+#[test]
+fn encrypted_pdf_asks_for_password() {
+    let path = tmp("enc.pdf", ENCRYPTED);
+    let mut s = Session::with_new();
+    let before = s.documents().len();
+    let e = s.execute("file.open", &json!({"path": path.to_str().unwrap()})).unwrap_err().to_string();
+    assert!(crate::cmd::file::needs_password(&e) && !crate::cmd::file::wrong_password(&e), "{e}");
+    assert_eq!(s.documents().len(), before, "nothing opened");
+}
+
+#[test]
+fn wrong_password_asks_again() {
+    let path = tmp("enc-wrong.pdf", ENCRYPTED);
+    let mut s = Session::with_new();
+    let e = s.execute("file.open", &json!({"path": path.to_str().unwrap(), "password": "yanlis"})).unwrap_err().to_string();
+    assert!(crate::cmd::file::needs_password(&e) && crate::cmd::file::wrong_password(&e), "{e}");
+}
+
+#[test]
+fn right_password_opens() {
+    let path = tmp("enc-right.pdf", ENCRYPTED);
+    let mut s = Session::with_new();
+    s.execute("file.open", &json!({"path": path.to_str().unwrap(), "password": "kullanici"})).unwrap();
+    let doc = &s.doc().unwrap().doc;
+    assert!(slide_text(&doc.slides[0]).contains("Secret text"), "{:?}", slide_text(&doc.slides[0]));
+}
+
+#[test]
+fn open_pdf_pages_param() {
+    let (doc, pdf) = sample_pdf();
+    let path = tmp("pages.pdf", &pdf);
+    let mut s = Session::with_new();
+    s.execute("file.open", &json!({"path": path.to_str().unwrap(), "pages": "2"})).unwrap();
+    let opened = &s.doc().unwrap().doc;
+    assert_eq!(opened.slides.len(), 1);
+    let want = squash(&slide_text(&doc.slides[1]));
+    let first = want.split(' ').next().unwrap_or("");
+    assert!(squash(&slide_text(&opened.slides[0])).contains(first), "{want:?}");
+}
+
+#[test]
+fn open_pdf_bad_pages() {
+    let (doc, pdf) = sample_pdf();
+    let path = tmp("bad-pages.pdf", &pdf);
+    let mut s = Session::with_new();
+    let e = s.execute("file.open", &json!({"path": path.to_str().unwrap(), "pages": "99"})).unwrap_err().to_string();
+    assert!(e.contains("99") && e.contains(&doc.slides.len().to_string()), "{e}");
+}
+
+#[test]
+fn open_pdf_says_it_was_converted() {
+    let (_, pdf) = sample_pdf();
+    let path = tmp("note.pdf", &pdf);
+    let mut s = Session::with_new();
+    let r = s.execute("file.open", &json!({"path": path.to_str().unwrap()})).unwrap();
+    assert_eq!(r["converted"]["from"], json!("pdf"), "{r}");
+    let msg = s.ui_requests.iter().find_map(|u| match u {
+        crate::UiRequest::Message { text } => Some(text.clone()),
+        _ => None,
+    });
+    assert!(msg.as_deref().is_some_and(|m| m.contains("PDF")), "{msg:?}");
+}
