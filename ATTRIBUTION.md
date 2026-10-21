@@ -36,6 +36,7 @@ artwork. The ribbon and menu icons stay original drawings.
 | `crates/fonts/tests/fixtures/legacy-regular.ttf` | DeckCraft contributors | the same family's one-glyph Regular face, built by `make_legacy_font.py` (fontTools as the builder only) | CC0-1.0 | Font lookup by Windows family name tests |
 | `crates/render/tests/fixtures/make_colr_font.py` | DeckCraft contributors | this repository | MIT OR Apache-2.0 | Regenerates the COLR test font |
 | `crates/engine/tests/data/encrypted.pdf` | DeckCraft contributors | a one-page synthetic PDF ("Secret text" in Helvetica) protected by PdfCraft's Protect (AES-256, open password `kullanici`, permissions password `sahip`) | MIT OR Apache-2.0 | Test fixture for opening password-protected PDFs |
+| `crates/engine/tests/data/scan.jpg` | DeckCraft contributors | a page of original text (a heading and two sentences) rendered by WordCraft (`wordcraft-cli render`, 2 px per point) and saved as a greyscale JPEG; the Liberation Sans glyphs (OFL-1.1) appear as pixels only | MIT OR Apache-2.0 | Test fixture for reading scanned PDF pages |
 | Lucide icon paths in `crates/engine/src/icon_data.rs` (Insert › Icons) | Lucide Contributors; Feather icons by Cole Bemis | https://github.com/lucide-icons/lucide/tree/440a1e1dfb1e712505308da46bead3c28b1f1398/icons (release 1.56.0, 2026-10-13) | ISC; MIT for the Feather-derived icons named in that commit's LICENSE | Stroke icons inserted as shapes |
 
 ## Bundled through dependencies

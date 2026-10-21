@@ -17,6 +17,15 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             new
         ),
+        cmd!(
+            query "tools.ocrModels",
+            "Text Recognition Models",
+            [],
+            None,
+            "{} → {installed: bool, path?: the folder they were found in, folder: where to put them (text-detection.rten, text-recognition.rten)}",
+            always,
+            ocr_models_cmd
+        ),
         cmd!(query "file.templates", "Starter Templates", [], None, "{} → [{name, summary, theme, slides}]", always, templates),
         cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"), "{path, password?: string (a password-protected PDF's), pages?: range (\"2-3,5\": a PDF's pages to open, 1-based; default all)} → {document, slides, …, converted?: {from: pdf, pages, imageOnlyPages, truncatedPages}}", always, open),
         cmd!(
@@ -148,6 +157,8 @@ pub struct PdfReport {
     pub image_only_pages: Vec<usize>,
     /// Pages (0-based) whose text may be missing (forms nested too deep to read).
     pub truncated_pages: Vec<usize>,
+    /// Pages (0-based) whose words were recognised from their picture.
+    pub ocr_pages: Vec<usize>,
 }
 
 /// How to open a file: a PDF's password and pages.
@@ -269,11 +280,23 @@ pub fn open_pdf(name: &str, bytes: &[u8], opts: &pdfcraft_office::Options) -> Re
 }
 
 fn open_pdf_report(name: &str, bytes: &[u8], opts: &pdfcraft_office::Options) -> Result<(Presentation, Vec<String>, PdfReport)> {
-    let out = pdfcraft_office::convert(bytes, pdfcraft_office::Target::PptxPages, opts).map_err(|e| pdf_error(name, e))?;
+    let mut out = pdfcraft_office::convert(bytes, pdfcraft_office::Target::PptxPages, opts).map_err(|e| pdf_error(name, e))?;
+    // Scans are read when the text recognition models are installed.
+    #[cfg(not(target_arch = "wasm32"))]
+    if !out.image_only_pages.is_empty()
+        && let Some(ocr) = ocr()
+    {
+        out = pdfcraft_office::convert_with_ocr(bytes, pdfcraft_office::Target::PptxPages, opts, ocr).map_err(|e| pdf_error(name, e))?;
+    }
     let (mut p, lost) =
         deckcraft_pptx::import_checked(&out.bytes).map_err(|e| EngineError::Other(format!("{name}: the converted PDF could not be read ({e})")))?;
     deckcraft_format::repair(&mut p);
-    let report = PdfReport { page_count: out.page_count, image_only_pages: out.image_only_pages, truncated_pages: out.truncated_pages };
+    let report = PdfReport {
+        page_count: out.page_count,
+        image_only_pages: out.image_only_pages,
+        truncated_pages: out.truncated_pages,
+        ocr_pages: out.ocr_pages,
+    };
     Ok((p, lost, report))
 }
 
@@ -305,8 +328,16 @@ fn report_pdf(s: &mut Session, report: &PdfReport) {
         if list.len() > 6 { format!("{}…", shown.join(", ")) } else { shown.join(", ") }
     };
     let mut text = format!("Converted from PDF ({} pages): the layout may differ from the original.", report.page_count);
+    if !report.ocr_pages.is_empty() {
+        text.push_str(&format!(" Pages {} were read from their pictures (OCR): check the text.", pages(&report.ocr_pages)));
+    }
     if !report.image_only_pages.is_empty() {
-        text.push_str(&format!(" Pages {} are pictures without text (scans); OCR can recognize their words.", pages(&report.image_only_pages)));
+        text.push_str(&format!(" Pages {} are pictures without text (scans)", pages(&report.image_only_pages)));
+        #[cfg(not(target_arch = "wasm32"))]
+        if ocr_models().is_none() {
+            text.push_str(&format!("; to read their words, put the text recognition models in {}", models_folder().display()));
+        }
+        text.push('.');
     }
     if !report.truncated_pages.is_empty() {
         text.push_str(&format!(" Some text on pages {} may be missing.", pages(&report.truncated_pages)));
@@ -317,8 +348,76 @@ fn report_pdf(s: &mut Session, report: &PdfReport) {
 fn converted(report: Option<&PdfReport>) -> Value {
     report.map_or(
         Value::Null,
-        |r| json!({"from": "pdf", "pages": r.page_count, "imageOnlyPages": r.image_only_pages, "truncatedPages": r.truncated_pages}),
+        |r| json!({"from": "pdf", "pages": r.page_count, "imageOnlyPages": r.image_only_pages, "truncatedPages": r.truncated_pages, "ocrPages": r.ocr_pages}),
     )
+}
+
+/// The folder DeckCraft keeps the text recognition models in, per user: `ocr-models` in the
+/// app's data folder (`~/.local/share/deckcraft`, `~/Library/Application Support/DeckCraft`,
+/// `%LOCALAPPDATA%\\DeckCraft`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn models_folder() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = var("HOME").unwrap_or_default();
+    let base = if cfg!(windows) {
+        var("LOCALAPPDATA").or_else(|| var("APPDATA")).unwrap_or(home).join("DeckCraft")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/DeckCraft")
+    } else {
+        var("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")).join("deckcraft")
+    };
+    base.join("ocr-models")
+}
+
+/// Where the models are looked for, in order: `DECKCRAFT_OCR_MODELS`, [`models_folder`], then
+/// PdfCraft's (`PDFCRAFT_MODELS`, its installed packages, a source tree beside this one).
+#[cfg(not(target_arch = "wasm32"))]
+fn model_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut dirs: Vec<PathBuf> = std::env::var_os("DECKCRAFT_OCR_MODELS").filter(|v| !v.is_empty()).map(PathBuf::from).into_iter().collect();
+    dirs.push(models_folder());
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        dirs.push(PathBuf::from(home).join(".local/share/pdfcraft/models"));
+    }
+    dirs.extend(["/usr/share/pdfcraft/models", "/usr/local/share/pdfcraft/models"].map(PathBuf::from));
+    dirs.extend(pdfcraft_ocr::Models::search_dirs());
+    dirs
+}
+
+/// The models in the first of `dirs` that has both files.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn models_in(dirs: &[std::path::PathBuf]) -> Option<pdfcraft_ocr::Models> {
+    dirs.iter().find_map(|d| pdfcraft_ocr::Models::in_dir(d))
+}
+
+/// The installed text recognition models, if any.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ocr_models() -> Option<pdfcraft_ocr::Models> {
+    models_in(&model_dirs())
+}
+
+/// The recogniser, loaded once (it takes a moment) the first time a scan is opened.
+#[cfg(not(target_arch = "wasm32"))]
+fn ocr() -> Option<&'static pdfcraft_ocr::Ocr> {
+    static OCR: std::sync::OnceLock<Option<pdfcraft_ocr::Ocr>> = std::sync::OnceLock::new();
+    OCR.get_or_init(|| {
+        let models = ocr_models()?;
+        pdfcraft_ocr::Ocr::load(&models).inspect_err(|e| log::warn!("text recognition: {e}")).ok()
+    })
+    .as_ref()
+}
+
+/// `tools.ocrModels`: are the text recognition models installed, and where do they go.
+#[cfg(not(target_arch = "wasm32"))]
+fn ocr_models_cmd(_s: &mut Session, _p: &Value) -> Result<Value> {
+    let found = ocr_models().and_then(|m| m.detection.parent().map(|p| p.display().to_string()));
+    Ok(json!({"installed": found.is_some(), "path": found, "folder": models_folder().display().to_string()}))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn ocr_models_cmd(_s: &mut Session, _p: &Value) -> Result<Value> {
+    Ok(json!({"installed": false, "folder": "ocr-models"}))
 }
 
 /// What opening a password-protected file without its password says.

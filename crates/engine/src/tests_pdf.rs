@@ -185,3 +185,72 @@ fn open_pdf_says_it_was_converted() {
     });
     assert!(msg.as_deref().is_some_and(|m| m.contains("PDF")), "{msg:?}");
 }
+
+/// A one-page PDF whose page is a picture of text: `tests/data/scan.jpg` (see ATTRIBUTION.md),
+/// 1191×561 pixels drawn at 595.5×280.5 points.
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_pdf() -> Vec<u8> {
+    let jpg: &[u8] = include_bytes!("../tests/data/scan.jpg");
+    let content = "q 595.5 0 0 280.5 0 0 cm /Im0 Do Q";
+    let mut objs: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.5 280.5] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>".to_vec(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()).into_bytes(),
+    ];
+    let mut image = format!(
+        "<< /Type /XObject /Subtype /Image /Width 1191 /Height 561 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+        jpg.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(jpg);
+    image.extend_from_slice(b"\nendstream");
+    objs.push(image);
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(o);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_scanned_pdf_is_read_with_the_models() {
+    if crate::cmd::file::ocr_models().is_none() {
+        eprintln!("skipped: no text recognition models (see tools.ocrModels)");
+        return;
+    }
+    let path = tmp("scan.pdf", &scan_pdf());
+    let mut s = Session::with_new();
+    let r = s.execute("file.open", &json!({"path": path.to_str().unwrap()})).unwrap();
+    assert_eq!(r["converted"]["ocrPages"], json!([0]), "{r}");
+    let text = squash(&slide_text(&s.doc().unwrap().doc.slides[0]));
+    assert!(text.contains("HELLO WORLD") && text.contains("lazy dog"), "{text:?}");
+    let msg = s.ui_requests.iter().find_map(|u| match u {
+        crate::UiRequest::Message { text } => Some(text.clone()),
+        _ => None,
+    });
+    assert!(msg.as_deref().is_some_and(|m| m.contains("read from their pictures")), "{msg:?}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn models_are_looked_for_and_their_folder_named() {
+    let empty = std::env::temp_dir().join(format!("deckcraft-no-models-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(crate::cmd::file::models_in(std::slice::from_ref(&empty)).is_none());
+    let mut s = Session::with_new();
+    let r = s.execute("tools.ocrModels", &json!({})).unwrap();
+    assert!(r["folder"].as_str().is_some_and(|f| f.contains("ocr-models")), "{r}");
+    assert!(r["installed"].is_boolean(), "{r}");
+}

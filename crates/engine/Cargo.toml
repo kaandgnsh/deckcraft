@@ -35,3 +35,8 @@ zip = { workspace = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 
+# Text recognition of scanned PDF pages (desktop only; the models are separate files).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pdfcraft-office = { workspace = true, features = ["ocr"] }
+pdfcraft-ocr = { workspace = true }
+

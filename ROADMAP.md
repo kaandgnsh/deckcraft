@@ -131,6 +131,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 | Date | What landed |
 |---|---|
+| 2026-10-21 | Scanned PDF pages open as text: with the text recognition models installed (`tools.ocrModels` names the folder), pages that are pictures without text are read and their paragraphs set as text boxes where they were, and the status line says which pages were read |
 | 2026-10-21 | PDF files open as presentations: one slide per page at the page's size, with the text in editable text boxes where it is and the pictures and vector shapes (PdfCraft's converter). A password-protected PDF asks for its password (again after a wrong one), `file.open`/`file.openBytes` take a page range (`pages`: "2-3, 5"), Reuse Slides takes PDFs, and the status line says the file was converted and names scanned pages without text |
 | 2026-10-18 | Native chart sidecar bytes move from JSON arrays into referenced ZIP entries, with shared media byte/item limits and bounded reads; older inline sidecars still load. Synthetic format regressions cover large workbooks and malformed members |
 | 2026-10-17 | Opening a file caps absurd effect sizes (glow, soft edges, shadows, reflections, on shapes, text and table text) at what Format Shape allows: a glow of 10^18 pt in a .pptx made rendering ask for 34 GB and abort |
